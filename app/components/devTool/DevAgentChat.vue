@@ -95,6 +95,11 @@ const handleKeydown = (e: KeyboardEvent) => {
           style="max-width: 85%;"
         >
           <span style="white-space: pre-wrap;">{{ msg.text }}</span>
+          <DevCodeSuggestion
+            v-for="(block, bIdx) in (msg.codeBlocks || [])"
+            :key="bIdx"
+            :block="block"
+          />
         </div>
       </div>
 
