@@ -1,11 +1,14 @@
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 
-export type CodeBlock = {
-  filename: string
+export type ChangeStatus = 'pending' | 'applied' | 'failed'
+
+export type CodeChange = {
+  filePath: string
+  description: string
   language: string
   code: string
-  action: 'create' | 'replace'
-  status: 'pending' | 'applied' | 'rejected'
+  status: ChangeStatus
+  errorMessage?: string
   previousCode?: string
 }
 
@@ -13,36 +16,36 @@ export type AgentMessage = {
   role: 'user' | 'agent'
   text: string
   timestamp: number
-  codeBlocks?: CodeBlock[]
+  changes?: CodeChange[]
 }
 
 const AGENT_BASE_URL = 'http://34.204.193.135:8000'
 
-/** ```lang:filename 형태의 코드블록을 파싱 */
-function parseCodeBlocks(text: string): CodeBlock[] {
-  const regex = /```(\w+)?(?::([^\n]+))?\n([\s\S]*?)```/g
-  const blocks: CodeBlock[] = []
-  let m: RegExpExecArray | null
-  while ((m = regex.exec(text)) !== null) {
-    blocks.push({
-      filename: m[2]?.trim() || '',
-      language: m[1] || 'vue',
-      code: m[3].trimEnd(),
-      action: 'replace',
-      status: 'pending',
-    })
-  }
-  return blocks
-}
-
-/** 코드블록을 제거한 텍스트 반환 */
-function stripCodeBlocks(text: string): string {
-  return text.replace(/```(\w+)?(?::([^\n]+))?\n[\s\S]*?```/g, '').trim()
+function toChanges(suggestions: any[]): CodeChange[] {
+  if (!Array.isArray(suggestions)) return []
+  return suggestions.map(s => ({
+    filePath: s.filename || '',
+    description: '',
+    language: s.language || 'js',
+    code: s.code || '',
+    status: 'pending' as ChangeStatus,
+  }))
 }
 
 export function useAgentChat() {
   const messages = ref<AgentMessage[]>([])
   const isLoading = ref(false)
+
+  const changeSummary = computed(() => {
+    const all = messages.value.flatMap(m => m.changes || [])
+    return {
+      pending: all.filter(c => c.status === 'pending').length,
+      applied: all.filter(c => c.status === 'applied').length,
+      failed: all.filter(c => c.status === 'failed').length,
+    }
+  })
+
+  const allChanges = computed(() => messages.value.flatMap(m => m.changes || []))
 
   async function send(query: string) {
     messages.value.push({ role: 'user', text: query, timestamp: Date.now() })
@@ -58,14 +61,14 @@ export function useAgentChat() {
       if (!res.ok) throw new Error(`${res.status}`)
 
       const data = await res.json()
-      const raw = data.answer ?? data.response ?? JSON.stringify(data)
-      const codeBlocks = parseCodeBlocks(raw)
+      const answer = data.answer ?? data.response ?? JSON.stringify(data)
+      const changes = toChanges(data.code_suggestions)
 
       messages.value.push({
         role: 'agent',
-        text: codeBlocks.length ? stripCodeBlocks(raw) || '코드 제안:' : raw,
+        text: answer,
         timestamp: Date.now(),
-        codeBlocks: codeBlocks.length ? codeBlocks : undefined,
+        changes: changes.length ? changes : undefined,
       })
     } catch (e: any) {
       messages.value.push({
@@ -82,5 +85,5 @@ export function useAgentChat() {
     messages.value = []
   }
 
-  return { messages, isLoading, send, clear }
+  return { messages, isLoading, send, clear, changeSummary, allChanges }
 }

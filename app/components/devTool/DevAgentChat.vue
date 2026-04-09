@@ -1,14 +1,25 @@
 <script setup lang="ts">
-import { ref, nextTick, inject } from 'vue'
+import { ref, nextTick, inject, computed, watch, type Ref } from 'vue'
 
 const isDarkTheme = inject('isDarkTheme', ref(true))
-const { messages, isLoading, send, clear } = useAgentChat()
+const agentCodeContext = inject<Ref<any>>('agentCodeContext', ref(null))
+const { messages, isLoading, send, clear, changeSummary, allChanges } = useAgentChat()
 
 const props = defineProps<{ isOpen: boolean }>()
 const emit = defineEmits<{ (e: 'close'): void }>()
 
 const userInput = ref('')
 const chatArea = ref<HTMLElement | null>(null)
+const suggestionRefs = ref<any[]>([])
+const allCollapsed = ref(false)
+
+// 코드 컨텍스트 블록
+type CodeBlock = { id: number; code: string; fileName: string; startLine: number; lineCount: number }
+let blockIdCounter = 0
+
+// 입력 세그먼트: 텍스트와 코드블록이 순서대로 섞임
+type Segment = { type: 'text'; value: string } | { type: 'code'; block: CodeBlock }
+const segments = ref<Segment[]>([{ type: 'text', value: '' }])
 
 const sampleQuestions = [
   '레이어 추가 방법은?',
@@ -16,6 +27,10 @@ const sampleQuestions = [
   '3D 객체 생성은 어떻게 해?',
   '지형 편집 기능 설명해줘',
 ]
+
+const hasChanges = computed(() =>
+  changeSummary.value.pending + changeSummary.value.applied + changeSummary.value.failed > 0
+)
 
 const scrollToBottom = () => {
   nextTick(() => {
@@ -28,19 +43,116 @@ const sendSample = async (q: string) => {
   scrollToBottom()
 }
 
+const hasInput = computed(() =>
+  segments.value.some(s =>
+    s.type === 'code' || (s.type === 'text' && s.value.trim())
+  )
+)
+
 const sendMessage = async () => {
-  const text = userInput.value.trim()
-  if (!text || isLoading.value) return
-  userInput.value = ''
-  await send(text)
+  if (!hasInput.value || isLoading.value) return
+
+  // 세그먼트를 하나의 쿼리로 조합
+  const parts = segments.value.map(s => {
+    if (s.type === 'code') {
+      const b = s.block
+      return `[${b.fileName} : Line ${b.startLine}-${b.startLine + b.lineCount - 1}]\n\`\`\`\n${b.code}\n\`\`\``
+    }
+    return s.value.trim()
+  }).filter(Boolean)
+
+  const fullQuery = parts.join('\n\n')
+  segments.value = [{ type: 'text', value: '' }]
+  await send(fullQuery)
   scrollToBottom()
 }
 
-const handleKeydown = (e: KeyboardEvent) => {
+const handleKeydown = (e: KeyboardEvent, segIndex: number) => {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
     sendMessage()
   }
+  // Backspace로 빈 텍스트 세그먼트에서 이전 코드블록 삭제
+  if (e.key === 'Backspace') {
+    const seg = segments.value[segIndex]
+    if (seg.type === 'text' && !seg.value && segIndex > 0) {
+      const prev = segments.value[segIndex - 1]
+      if (prev.type === 'code') {
+        e.preventDefault()
+        segments.value.splice(segIndex - 1, 2) // 코드블록 + 빈 텍스트 제거
+        if (!segments.value.length) segments.value.push({ type: 'text', value: '' })
+        nextTick(() => focusLastTextarea())
+      }
+    }
+  }
+}
+
+const removeBlock = (blockId: number) => {
+  const idx = segments.value.findIndex(s => s.type === 'code' && s.block.id === blockId)
+  if (idx === -1) return
+  // 코드블록 제거 후 앞뒤 텍스트 세그먼트 병합
+  const before = idx > 0 && segments.value[idx - 1].type === 'text' ? segments.value[idx - 1] as { type: 'text'; value: string } : null
+  const after = idx < segments.value.length - 1 && segments.value[idx + 1].type === 'text' ? segments.value[idx + 1] as { type: 'text'; value: string } : null
+
+  if (before && after) {
+    before.value = (before.value + '\n' + after.value).trim()
+    segments.value.splice(idx, 2) // 코드블록 + 뒤 텍스트 제거
+  } else {
+    segments.value.splice(idx, 1)
+  }
+  if (!segments.value.length || segments.value[segments.value.length - 1].type !== 'text') {
+    segments.value.push({ type: 'text', value: '' })
+  }
+}
+
+const focusLastTextarea = () => {
+  nextTick(() => {
+    const textareas = document.querySelectorAll('.agent-input .seg-textarea textarea') as NodeListOf<HTMLTextAreaElement>
+    if (textareas.length) textareas[textareas.length - 1].focus()
+  })
+}
+
+// Ctrl+L / 플로팅 버튼으로 선택된 코드 수신 → 마지막 위치에 블록 삽입
+watch(agentCodeContext, (info) => {
+  if (!info || !info.code?.trim()) return
+
+  const lineCount = info.code.trim().split('\n').length
+  const block: CodeBlock = {
+    id: ++blockIdCounter,
+    code: info.code.trim(),
+    fileName: info.fileName || '선택된 코드',
+    startLine: info.startLine || 1,
+    lineCount,
+  }
+
+  segments.value.push({ type: 'code', block }, { type: 'text', value: '' })
+  agentCodeContext.value = null
+  focusLastTextarea()
+})
+
+function applyAll() {
+  allChanges.value
+    .filter(c => c.status === 'pending')
+    .forEach(c => {
+      // trigger each card's apply via direct status manipulation
+      const idx = allChanges.value.indexOf(c)
+      const refEl = suggestionRefs.value[idx]
+      if (refEl?.handleApply) refEl.handleApply()
+    })
+}
+
+function undoAll() {
+  allChanges.value
+    .filter(c => c.status === 'applied')
+    .forEach(c => {
+      const idx = allChanges.value.indexOf(c)
+      const refEl = suggestionRefs.value[idx]
+      if (refEl?.handleUndo) refEl.handleUndo()
+    })
+}
+
+function toggleCollapseAll() {
+  allCollapsed.value = !allCollapsed.value
 }
 </script>
 
@@ -49,7 +161,7 @@ const handleKeydown = (e: KeyboardEvent) => {
     <!-- Header -->
     <div class="agent-header px-4 d-flex align-center justify-space-between" style="height: 38px; min-height: 38px;">
       <div class="d-flex align-center gap-2">
-        <v-icon size="16" color="green">mdi-lan-connect</v-icon>
+        <div class="status-dot" />
         <span class="text-caption font-weight-bold" style="font-size: 13px;">Agent</span>
       </div>
       <div class="d-flex align-center gap-1">
@@ -89,16 +201,19 @@ const handleKeydown = (e: KeyboardEvent) => {
         <v-avatar v-if="msg.role === 'agent'" size="28" color="surface-light" class="mr-2 align-self-start">
           <v-icon size="16" color="green">mdi-robot</v-icon>
         </v-avatar>
-        <div
-          class="msg-bubble pa-3 rounded-lg text-body-2"
-          :class="msg.role === 'user' ? 'user-msg' : 'agent-msg'"
-          style="max-width: 85%;"
-        >
-          <span style="white-space: pre-wrap;">{{ msg.text }}</span>
-          <DevCodeSuggestion
-            v-for="(block, bIdx) in (msg.codeBlocks || [])"
-            :key="bIdx"
-            :block="block"
+        <div style="max-width: 90%;">
+          <div
+            class="msg-bubble pa-3 rounded-lg text-body-2"
+            :class="msg.role === 'user' ? 'user-msg' : 'agent-msg'"
+          >
+            <span style="white-space: pre-wrap;">{{ msg.text }}</span>
+          </div>
+          <DevToolDevCodeSuggestion
+            v-for="(change, cIdx) in (msg.changes || [])"
+            :key="cIdx"
+            :ref="el => { if (el) suggestionRefs[allChanges.indexOf(change)] = el }"
+            :change="change"
+            :collapsed="allCollapsed"
           />
         </div>
       </div>
@@ -113,33 +228,84 @@ const handleKeydown = (e: KeyboardEvent) => {
       </div>
     </div>
 
-    <v-divider />
+    <!-- Change Status Bar -->
+    <Transition name="fade">
+      <div v-if="hasChanges" class="change-bar">
+        <div class="d-flex align-center gap-2 px-3 py-1">
+          <!-- Status counts -->
+          <div class="d-flex align-center gap-3 flex-grow-1">
+            <span v-if="changeSummary.pending" class="status-item text-amber-lighten-1">
+              <v-icon size="12">mdi-clock-outline</v-icon>
+              <span class="text-caption">{{ changeSummary.pending }}</span>
+            </span>
+            <span v-if="changeSummary.applied" class="status-item text-green">
+              <v-icon size="12">mdi-check-circle</v-icon>
+              <span class="text-caption">{{ changeSummary.applied }}</span>
+            </span>
+            <span v-if="changeSummary.failed" class="status-item text-red">
+              <v-icon size="12">mdi-alert-circle</v-icon>
+              <span class="text-caption">{{ changeSummary.failed }}</span>
+            </span>
+          </div>
+
+          <!-- Bulk actions -->
+          <v-btn size="x-small" variant="text" density="compact" @click="toggleCollapseAll" :title="allCollapsed ? '모두 펼치기' : '모두 접기'">
+            <v-icon size="14">{{ allCollapsed ? 'mdi-unfold-more-horizontal' : 'mdi-unfold-less-horizontal' }}</v-icon>
+          </v-btn>
+          <v-btn v-if="changeSummary.pending > 0" size="x-small" color="green" variant="tonal" class="bulk-btn" @click="applyAll">
+            <v-icon size="12" start>mdi-check-all</v-icon>전체 적용
+          </v-btn>
+          <v-btn v-if="changeSummary.applied > 0" size="x-small" color="orange" variant="tonal" class="bulk-btn" @click="undoAll">
+            <v-icon size="12" start>mdi-undo-variant</v-icon>전체 되돌리기
+          </v-btn>
+        </div>
+      </div>
+    </Transition>
 
     <!-- Input -->
     <div class="agent-input pa-3">
-      <v-textarea
-        v-model="userInput"
-        variant="outlined"
-        rows="1"
-        auto-grow
-        max-rows="4"
-        density="compact"
-        hide-details
-        placeholder="Agent에게 물어보세요..."
-        class="agent-textarea"
-        bg-color="surface"
-        @keydown="handleKeydown"
-      >
-        <template #append-inner>
+      <div class="input-wrapper rounded-lg">
+        <template v-for="(seg, sIdx) in segments" :key="sIdx">
+          <!-- Code Block Chip -->
+          <div v-if="seg.type === 'code'" class="attached-code mx-2 mt-2 rounded">
+            <div class="ac-header d-flex align-center justify-space-between px-2 py-1">
+              <div class="d-flex align-center gap-1" style="min-width:0;">
+                <v-icon size="12" color="green">mdi-file-code-outline</v-icon>
+                <span class="ac-filename text-truncate">{{ seg.block.fileName }}</span>
+                <span class="ac-lines">L{{ seg.block.startLine }}-{{ seg.block.startLine + seg.block.lineCount - 1 }}</span>
+              </div>
+              <v-btn icon variant="text" size="x-small" density="compact" @click="removeBlock(seg.block.id)" style="width:18px;height:18px;">
+                <v-icon size="12">mdi-close</v-icon>
+              </v-btn>
+            </div>
+          </div>
+          <!-- Text Input -->
+          <v-textarea
+            v-else
+            v-model="seg.value"
+            variant="plain"
+            rows="1"
+            auto-grow
+            max-rows="4"
+            density="compact"
+            hide-details
+            :placeholder="sIdx === 0 && segments.length === 1 ? 'Agent에게 물어보세요...' : sIdx === segments.length - 1 ? '이어서 질문하세요...' : ''"
+            class="seg-textarea agent-textarea px-3"
+            @keydown="handleKeydown($event, sIdx)"
+          />
+        </template>
+
+        <!-- Send Button -->
+        <div class="d-flex justify-end px-2 pb-1">
           <v-btn
             icon variant="text" size="small" color="green"
-            :disabled="!userInput.trim() || isLoading"
+            :disabled="!hasInput || isLoading"
             @click="sendMessage"
           >
             <v-icon>mdi-send</v-icon>
           </v-btn>
-        </template>
-      </v-textarea>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -150,15 +316,21 @@ const handleKeydown = (e: KeyboardEvent) => {
   color: rgba(var(--v-theme-on-surface));
 }
 .agent-header {
-  background-color: rgba(var(--v-theme-surface-variant), 0.1);
+  background-color: rgba(var(--v-theme-surface-variant), 0.08);
+}
+.status-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: #4caf50;
+  box-shadow: 0 0 6px rgba(76, 175, 80, 0.5);
 }
 .user-msg {
-  background-color: rgb(var(--v-theme-primary));
+  background: linear-gradient(135deg, rgb(var(--v-theme-primary)), rgba(var(--v-theme-primary), 0.85));
   color: #fff;
   border-top-right-radius: 0 !important;
 }
 .agent-msg {
-  background-color: rgba(var(--v-theme-surface-variant), 0.15);
+  background-color: rgba(var(--v-theme-surface-variant), 0.12);
   color: rgba(var(--v-theme-on-surface));
   border-top-left-radius: 0 !important;
 }
@@ -186,7 +358,77 @@ const handleKeydown = (e: KeyboardEvent) => {
 .agent-messages::-webkit-scrollbar { width: 5px; }
 .agent-messages::-webkit-scrollbar-track { background: transparent; }
 .agent-messages::-webkit-scrollbar-thumb {
-  background-color: rgba(var(--v-theme-on-surface-variant), 0.3);
+  background-color: rgba(var(--v-theme-on-surface-variant), 0.2);
   border-radius: 3px;
 }
+/* Change status bar */
+.change-bar {
+  background: rgba(var(--v-theme-surface-variant), 0.08);
+  border-top: 1px solid rgba(var(--v-theme-on-surface), 0.06);
+}
+.status-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.bulk-btn {
+  text-transform: none !important;
+  letter-spacing: 0 !important;
+  font-weight: 500;
+  font-size: 11px !important;
+  height: 24px !important;
+}
+/* Fade transition */
+.fade-enter-active, .fade-leave-active {
+  transition: opacity 0.2s, transform 0.2s;
+}
+.fade-enter-from, .fade-leave-to {
+  opacity: 0;
+  transform: translateY(4px);
+}
+/* Attached code block */
+.input-wrapper {
+  border: 1px solid rgba(var(--v-theme-on-surface), 0.15);
+  background: rgba(var(--v-theme-surface), 1);
+  transition: border-color 0.2s;
+}
+.input-wrapper:focus-within {
+  border-color: #4caf50;
+}
+.attached-code {
+  border: 1px solid rgba(76, 175, 80, 0.25);
+  background: rgba(76, 175, 80, 0.06);
+  overflow: hidden;
+}
+.ac-header {
+  min-height: 24px;
+}
+.ac-filename {
+  font-size: 11px;
+  font-weight: 600;
+  max-width: 120px;
+}
+.ac-lines {
+  font-size: 10px;
+  opacity: 0.5;
+}
+.ac-preview {
+  max-height: 60px;
+  overflow-y: auto;
+}
+.ac-preview pre {
+  margin: 0;
+  white-space: pre-wrap;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 10px;
+  line-height: 1.4;
+  opacity: 0.6;
+}
+.ac-preview::-webkit-scrollbar { width: 3px; }
+.ac-preview::-webkit-scrollbar-thumb {
+  background: rgba(var(--v-theme-on-surface), 0.15);
+  border-radius: 2px;
+}
+.seg-textarea { font-size: 13px; }
+.seg-textarea :deep(.v-field__input) { min-height: 28px !important; padding-top: 4px; padding-bottom: 4px; }
 </style>

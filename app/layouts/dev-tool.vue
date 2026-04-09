@@ -29,6 +29,11 @@ const isAgentOpen = ref(false);
 const isPreviewOpen = ref(true);
 provide("isPreviewOpen", isPreviewOpen);
 
+// Agent에 코드 컨텍스트 전달용
+const agentCodeContext = ref(null);
+provide("agentCodeContext", agentCodeContext);
+provide("isAgentOpen", isAgentOpen);
+
 const generateUUID = () => {
   if (typeof crypto !== "undefined" && crypto.randomUUID) {
     return crypto.randomUUID();
