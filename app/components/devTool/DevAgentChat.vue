@@ -10,10 +10,22 @@ const emit = defineEmits<{ (e: 'close'): void }>()
 const userInput = ref('')
 const chatArea = ref<HTMLElement | null>(null)
 
+const sampleQuestions = [
+  '레이어 추가 방법은?',
+  '카메라 이동 방법 알려줘',
+  '3D 객체 생성은 어떻게 해?',
+  '지형 편집 기능 설명해줘',
+]
+
 const scrollToBottom = () => {
   nextTick(() => {
     if (chatArea.value) chatArea.value.scrollTop = chatArea.value.scrollHeight
   })
+}
+
+const sendSample = async (q: string) => {
+  await send(q)
+  scrollToBottom()
 }
 
 const sendMessage = async () => {
@@ -56,7 +68,16 @@ const handleKeydown = (e: KeyboardEvent) => {
     <div class="agent-messages flex-grow-1 overflow-y-auto pa-4" ref="chatArea">
       <div v-if="messages.length === 0" class="empty-state text-center pa-8">
         <v-icon size="48" color="disabled" class="mb-3">mdi-robot-outline</v-icon>
-        <p class="text-body-2 text-medium-emphasis">Agent에게 질문하세요.</p>
+        <p class="text-body-2 text-medium-emphasis mb-4">Agent에게 질문하세요.</p>
+        <div class="d-flex flex-wrap justify-center" style="gap: 10px; margin-top: 12px;">
+          <v-chip
+            v-for="q in sampleQuestions" :key="q"
+            size="small" variant="tonal" color="green"
+            class="cursor-pointer sample-chip px-4"
+            style="margin: 4px 0;"
+            @click="sendSample(q)"
+          >{{ q }}</v-chip>
+        </div>
       </div>
 
       <div
@@ -137,6 +158,13 @@ const handleKeydown = (e: KeyboardEvent) => {
   border-top-left-radius: 0 !important;
 }
 .agent-textarea { font-size: 13px; }
+.sample-chip {
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+.sample-chip:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(76, 175, 80, 0.25);
+}
 .dot {
   width: 6px; height: 6px;
   background-color: #888; border-radius: 50%;

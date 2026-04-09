@@ -6,7 +6,7 @@ export type AgentMessage = {
   timestamp: number
 }
 
-const AGENT_BASE_URL = 'http://localhost:8000'
+const AGENT_BASE_URL = 'http://34.204.193.135:8000'
 
 export function useAgentChat() {
   const messages = ref<AgentMessage[]>([])
@@ -17,10 +17,10 @@ export function useAgentChat() {
     isLoading.value = true
 
     try {
-      const res = await fetch(`${AGENT_BASE_URL}/agent/chat`, {
+      const res = await fetch(`${AGENT_BASE_URL}/api/v1/ask`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: query }),
+        body: JSON.stringify({ question: query }),
       })
 
       if (!res.ok) throw new Error(`${res.status}`)
@@ -28,7 +28,7 @@ export function useAgentChat() {
       const data = await res.json()
       messages.value.push({
         role: 'agent',
-        text: data.response ?? data.message ?? JSON.stringify(data),
+        text: data.answer ?? JSON.stringify(data),
         timestamp: Date.now(),
       })
     } catch (e: any) {
