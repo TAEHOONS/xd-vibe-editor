@@ -4,7 +4,7 @@ import { ref, nextTick, inject, computed, watch, type Ref } from 'vue'
 const isDarkTheme = inject('isDarkTheme', ref(true))
 const agentCodeContext = inject<Ref<any>>('agentCodeContext', ref(null))
 const agentErrorContext = inject<Ref<any>>('agentErrorContext', ref(null))
-const { messages, isLoading, send, clear, changeSummary, allChanges } = useAgentChat()
+const { messages, isLoading, currentStep, stepMessage, send, clear, changeSummary, allChanges } = useAgentChat()
 
 const props = defineProps<{ isOpen: boolean }>()
 const emit = defineEmits<{ (e: 'close'): void }>()
@@ -273,12 +273,33 @@ function toggleCollapseAll() {
         </div>
       </div>
 
-      <div v-if="isLoading" class="d-flex justify-start mb-3">
-        <v-avatar size="28" color="surface-light" class="mr-2">
-          <v-icon size="16" color="green">mdi-robot</v-icon>
-        </v-avatar>
-        <div class="loading-dots d-flex align-center gap-1 pa-3 rounded-lg agent-msg">
-          <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+      <div v-if="isLoading" class="d-flex flex-column mb-3">
+        <!-- 진행 단계 표시 -->
+        <div v-if="currentStep" class="step-progress mb-2">
+          <div class="d-flex align-center gap-2 pa-3 rounded-lg">
+            <v-avatar size="28" color="green" class="flex-shrink-0">
+              <v-icon size="16" color="white">mdi-robot</v-icon>
+            </v-avatar>
+            <div class="flex-grow-1">
+              <div class="d-flex align-center gap-2 mb-1">
+                <v-progress-circular indeterminate size="14" width="2" color="green" />
+                <span class="text-caption font-weight-bold text-green">{{ stepMessage }}</span>
+              </div>
+              <div class="step-bar">
+                <div class="step-bar-fill" :class="`step-${currentStep}`"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        
+        <!-- 기본 로딩 (단계 정보 없을 때) -->
+        <div v-else class="d-flex justify-start">
+          <v-avatar size="28" color="surface-light" class="mr-2">
+            <v-icon size="16" color="green">mdi-robot</v-icon>
+          </v-avatar>
+          <div class="loading-dots d-flex align-center gap-1 pa-3 rounded-lg agent-msg">
+            <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+          </div>
         </div>
       </div>
     </div>
@@ -409,6 +430,32 @@ function toggleCollapseAll() {
 @keyframes wave {
   0%, 60%, 100% { transform: initial; }
   30% { transform: translateY(-4px); }
+}
+.step-progress {
+  width: 100%;
+  background-color: rgba(var(--v-theme-surface-variant), 0.08);
+  border-radius: 8px;
+  border-left: 3px solid #4caf50;
+}
+.step-bar {
+  height: 3px;
+  background-color: rgba(var(--v-theme-surface-variant), 0.2);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-top: 4px;
+}
+.step-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #4caf50, #66bb6a);
+  transition: width 0.3s ease;
+  animation: progress-pulse 1.5s ease-in-out infinite;
+}
+.step-bar-fill.step-analyzing { width: 33%; }
+.step-bar-fill.step-searching { width: 66%; }
+.step-bar-fill.step-generating { width: 90%; }
+@keyframes progress-pulse {
+  0%, 100% { opacity: 0.8; }
+  50% { opacity: 1; }
 }
 .agent-messages::-webkit-scrollbar { width: 5px; }
 .agent-messages::-webkit-scrollbar-track { background: transparent; }

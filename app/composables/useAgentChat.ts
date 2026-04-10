@@ -7,6 +7,7 @@ export type CodeChange = {
   description: string
   language: string
   code: string
+  action: 'auto' | 'replace_file' | 'insert_function' | 'insert_script' | 'insert_template'
   status: ChangeStatus
   errorMessage?: string
   previousCode?: string
@@ -17,17 +18,21 @@ export type AgentMessage = {
   text: string
   timestamp: number
   changes?: CodeChange[]
+  streaming?: boolean
 }
 
-const AGENT_BASE_URL = 'http://34.204.193.135:8000'
+export type AgentStep = 'analyzing' | 'searching' | 'generating' | 'validating' | null
+
+const AGENT_BASE_URL = 'http://localhost:8000'
 
 function toChanges(suggestions: any[]): CodeChange[] {
   if (!Array.isArray(suggestions)) return []
   return suggestions.map(s => ({
     filePath: s.filename || '',
-    description: '',
+    description: s.description || '',
     language: s.language || 'js',
     code: s.code || '',
+    action: s.action || 'auto',
     status: 'pending' as ChangeStatus,
   }))
 }
@@ -35,6 +40,8 @@ function toChanges(suggestions: any[]): CodeChange[] {
 export function useAgentChat() {
   const messages = ref<AgentMessage[]>([])
   const isLoading = ref(false)
+  const currentStep = ref<AgentStep>(null)
+  const stepMessage = ref('')
 
   const changeSummary = computed(() => {
     const all = messages.value.flatMap(m => m.changes || [])
@@ -50,6 +57,16 @@ export function useAgentChat() {
   async function send(query: string, context?: { code?: string; fileName?: string; error?: string }) {
     messages.value.push({ role: 'user', text: query, timestamp: Date.now() })
     isLoading.value = true
+    currentStep.value = null
+
+    // 스트리밍 메시지 placeholder
+    const streamingMsg: AgentMessage = {
+      role: 'agent',
+      text: '',
+      timestamp: Date.now(),
+      streaming: true
+    }
+    messages.value.push(streamingMsg)
 
     try {
       const body: Record<string, any> = { question: query }
@@ -57,7 +74,7 @@ export function useAgentChat() {
       if (context?.fileName) body.file_name = context.fileName
       if (context?.error) body.error_info = context.error
 
-      const res = await fetch(`${AGENT_BASE_URL}/api/v1/ask`, {
+      const res = await fetch(`${AGENT_BASE_URL}/api/v1/ask/stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -65,30 +82,76 @@ export function useAgentChat() {
 
       if (!res.ok) throw new Error(`${res.status}`)
 
-      const data = await res.json()
-      const answer = data.answer ?? data.response ?? JSON.stringify(data)
-      const changes = toChanges(data.code_suggestions)
+      const reader = res.body?.getReader()
+      const decoder = new TextDecoder()
 
-      messages.value.push({
-        role: 'agent',
-        text: answer,
-        timestamp: Date.now(),
-        changes: changes.length ? changes : undefined,
-      })
+      if (!reader) throw new Error('No reader')
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        const chunk = decoder.decode(value)
+        const lines = chunk.split('\n')
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue
+          
+          const data = line.slice(6)
+          if (!data.trim()) continue
+
+          try {
+            const event = JSON.parse(data)
+            console.log('[Agent Event]', event) // 디버깅
+
+            if (event.type === 'step') {
+              currentStep.value = event.step
+              stepMessage.value = event.message || ''
+              console.log('→ Step:', event.step, event.message)
+            } else if (event.type === 'token') {
+              streamingMsg.text += event.content
+            } else if (event.type === 'result') {
+              streamingMsg.text = event.answer
+              streamingMsg.streaming = false
+              if (event.code_suggestions) {
+                streamingMsg.changes = toChanges(event.code_suggestions)
+              }
+            } else if (event.type === 'done') {
+              currentStep.value = null
+              stepMessage.value = ''
+            } else if (event.type === 'error') {
+              streamingMsg.text = `오류: ${event.message}`
+              streamingMsg.streaming = false
+            }
+          } catch (e) {
+            console.warn('이벤트 파싱 실패:', e)
+          }
+        }
+      }
     } catch (e: any) {
-      messages.value.push({
-        role: 'agent',
-        text: `연결 오류: ${e.message}`,
-        timestamp: Date.now(),
-      })
+      streamingMsg.text = `연결 오류: ${e.message}`
+      streamingMsg.streaming = false
     } finally {
       isLoading.value = false
+      currentStep.value = null
+      stepMessage.value = ''
     }
   }
 
   function clear() {
     messages.value = []
+    currentStep.value = null
+    stepMessage.value = ''
   }
 
-  return { messages, isLoading, send, clear, changeSummary, allChanges }
+  return { 
+    messages, 
+    isLoading, 
+    currentStep, 
+    stepMessage, 
+    send, 
+    clear, 
+    changeSummary, 
+    allChanges 
+  }
 }
