@@ -3,6 +3,7 @@ import { ref, nextTick, inject, computed, watch, type Ref } from 'vue'
 
 const isDarkTheme = inject('isDarkTheme', ref(true))
 const agentCodeContext = inject<Ref<any>>('agentCodeContext', ref(null))
+const agentErrorContext = inject<Ref<any>>('agentErrorContext', ref(null))
 const { messages, isLoading, send, clear, changeSummary, allChanges } = useAgentChat()
 
 const props = defineProps<{ isOpen: boolean }>()
@@ -38,8 +39,19 @@ const scrollToBottom = () => {
   })
 }
 
+const replStore = useState<any>('repl-store')
+
+// 현재 에디터의 전체 코드와 파일명 가져오기
+function getEditorContext() {
+  const store = replStore.value
+  if (!store) return {}
+  const fileName = store.activeFile?.filename || ''
+  const file = store.files?.[fileName]
+  return { code: file?.code || '', fileName }
+}
+
 const sendSample = async (q: string) => {
-  await send(q)
+  await send(q, getEditorContext())
   scrollToBottom()
 }
 
@@ -63,7 +75,7 @@ const sendMessage = async () => {
 
   const fullQuery = parts.join('\n\n')
   segments.value = [{ type: 'text', value: '' }]
-  await send(fullQuery)
+  await send(fullQuery, getEditorContext())
   scrollToBottom()
 }
 
@@ -130,6 +142,29 @@ watch(agentCodeContext, (info) => {
   focusLastTextarea()
 })
 
+// 프리뷰 에러 수집 (자동 전송 안 함, 목록으로 표시)
+const errorList = ref<{ message: string; line?: number; timestamp: number }[]>([])
+
+watch(agentErrorContext, (err) => {
+  if (!err) return
+  // 중복 방지
+  if (!errorList.value.some(e => e.message === err.message)) {
+    errorList.value.push({ message: err.message, line: err.line, timestamp: Date.now() })
+  }
+  agentErrorContext.value = null
+})
+
+function askAboutError(err: { message: string; line?: number }) {
+  const ctx = getEditorContext()
+  const query = `에러: ${err.message}${err.line ? ` (line ${err.line})` : ''}\n이 에러를 수정해주세요.`
+  send(query, { ...ctx, error: err.message })
+  scrollToBottom()
+}
+
+function clearErrors() {
+  errorList.value = []
+}
+
 function applyAll() {
   allChanges.value
     .filter(c => c.status === 'pending')
@@ -178,6 +213,26 @@ function toggleCollapseAll() {
 
     <!-- Messages -->
     <div class="agent-messages flex-grow-1 overflow-y-auto pa-4" ref="chatArea">
+      <!-- Error List -->
+      <div v-if="errorList.length" class="error-list mb-3 rounded-lg">
+        <div class="el-header d-flex align-center justify-space-between px-3 py-1">
+          <div class="d-flex align-center gap-1">
+            <v-icon size="14" color="red">mdi-alert-circle</v-icon>
+            <span class="text-caption font-weight-medium">에러 {{ errorList.length }}건</span>
+          </div>
+          <v-btn icon variant="text" size="x-small" density="compact" @click="clearErrors">
+            <v-icon size="12">mdi-close</v-icon>
+          </v-btn>
+        </div>
+        <div v-for="(err, eIdx) in errorList" :key="eIdx"
+          class="el-item d-flex align-center justify-space-between px-3 py-1 cursor-pointer"
+          @click="askAboutError(err)"
+        >
+          <span class="text-caption text-truncate" style="min-width:0;">{{ err.message }}</span>
+          <v-icon size="12" color="green" class="flex-shrink-0 ml-1">mdi-send</v-icon>
+        </div>
+      </div>
+
       <div v-if="messages.length === 0" class="empty-state text-center pa-8">
         <v-icon size="48" color="disabled" class="mb-3">mdi-robot-outline</v-icon>
         <p class="text-body-2 text-medium-emphasis mb-4">Agent에게 질문하세요.</p>
@@ -360,6 +415,27 @@ function toggleCollapseAll() {
 .agent-messages::-webkit-scrollbar-thumb {
   background-color: rgba(var(--v-theme-on-surface-variant), 0.2);
   border-radius: 3px;
+}
+/* Change status bar */
+/* Error list */
+.error-list {
+  border: 1px solid rgba(244, 67, 54, 0.25);
+  background: rgba(244, 67, 54, 0.05);
+  overflow: hidden;
+}
+.el-header {
+  min-height: 28px;
+  border-bottom: 1px solid rgba(244, 67, 54, 0.1);
+}
+.el-item {
+  transition: background 0.15s;
+  min-height: 28px;
+}
+.el-item:hover {
+  background: rgba(244, 67, 54, 0.08);
+}
+.el-item + .el-item {
+  border-top: 1px solid rgba(var(--v-theme-on-surface), 0.04);
 }
 /* Change status bar */
 .change-bar {

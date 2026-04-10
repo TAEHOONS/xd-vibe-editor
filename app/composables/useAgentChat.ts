@@ -47,15 +47,20 @@ export function useAgentChat() {
 
   const allChanges = computed(() => messages.value.flatMap(m => m.changes || []))
 
-  async function send(query: string) {
+  async function send(query: string, context?: { code?: string; fileName?: string; error?: string }) {
     messages.value.push({ role: 'user', text: query, timestamp: Date.now() })
     isLoading.value = true
 
     try {
+      const body: Record<string, any> = { question: query }
+      if (context?.code) body.source_code = context.code
+      if (context?.fileName) body.file_name = context.fileName
+      if (context?.error) body.error_info = context.error
+
       const res = await fetch(`${AGENT_BASE_URL}/api/v1/ask`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question: query }),
+        body: JSON.stringify(body),
       })
 
       if (!res.ok) throw new Error(`${res.status}`)

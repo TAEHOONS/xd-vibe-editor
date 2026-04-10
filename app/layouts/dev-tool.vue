@@ -34,6 +34,10 @@ const agentCodeContext = ref(null);
 provide("agentCodeContext", agentCodeContext);
 provide("isAgentOpen", isAgentOpen);
 
+// iframe 에러를 Agent에 전달
+const agentErrorContext = ref(null);
+provide("agentErrorContext", agentErrorContext);
+
 const generateUUID = () => {
   if (typeof crypto !== "undefined" && crypto.randomUUID) {
     return crypto.randomUUID();

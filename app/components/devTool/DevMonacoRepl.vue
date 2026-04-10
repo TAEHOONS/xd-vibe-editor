@@ -7,6 +7,7 @@ const notifyEditorEngineReady = inject<(() => void) | undefined>(
 );
 
 const agentCodeContext = inject<Ref<any>>("agentCodeContext", ref(null));
+const agentErrorContext = inject<Ref<any>>("agentErrorContext", ref(null));
 const isAgentOpen = inject<Ref<boolean>>("isAgentOpen", ref(false));
 // import DevStatusBar from './DevStatusBar.vue';
 
@@ -100,7 +101,10 @@ const previewOptions = ref({
       import { inject, onMounted, defineProps } from 'vue'
       import { createPinia, setActivePinia } from 'pinia'
       import { useAppStore } from '~/stores/appStore'
-      import XDWorld from 'XDWorld'
+      if (window.__XDWORLD_INITIALIZED__) {
+        window.__XDWORLD_INITIALIZED__ = false;
+        window.location.reload();
+      }
     `,
     useCode: '', 
   },
@@ -231,7 +235,22 @@ function updateMockFetch() {
         }
       })
       app.use(vuetify)
-      app.use(XDWorld)
+
+      // XDWorld 엔진 직접 로드 (import 없이)
+      if (!window._XDWorldEM_loaded) {
+        if (!document.querySelector('script[src*="XDWorldEM.js"]')) {
+          const s = document.createElement('script');
+          s.src = 'https://cdn.xdworld.kr/latest/XDWorldEM.js';
+          s.onload = () => { window._XDWorldEM_loaded = true; };
+          document.head.appendChild(s);
+        } else {
+          window._XDWorldEM_loaded = true;
+        }
+      }
+      if (window.Module) {
+        app.provide('xdworld', window.Module);
+        app.config.globalProperties.$xdworld = window.Module;
+      }
 
       setTimeout(() => {
 
@@ -243,13 +262,7 @@ function updateMockFetch() {
         }
         // 엔진 초기화
         const initEngine = () => {
-            // [HMR 감지] 엔진 리로드로 상태 초기화
-            if (window.Module && window.__XDWORLD_INITIALIZED__) {
-                 window.location.reload();
-                 return;
-            }
-
-            if (window.Module) {
+            if (window.Module && typeof window.Module.initialize === 'function') {
                 app.config.globalProperties.$xdworld = window.Module;
 
                 window.Module.initialize({
@@ -306,6 +319,9 @@ function updateMockFetch() {
                 
                 createLayer();
                 window.useNuxtApp = () => ({ $xdworld: window.Module });
+            } else {
+                // Module 미로드 또는 initialize 미준비 — 재시도
+                setTimeout(initEngine, 500);
             }
         };
         initEngine();
@@ -393,10 +409,16 @@ const findNodeRecursive = (nodes: any[], predicate: string | ((node: any) => boo
 
 // Iframe 내부에서 보낸 메시지 수신 리스너
 const handleMessage = (e: MessageEvent) => {
-  const iframe = document.querySelector('iframe');
+  const iframe = document.querySelector('.vue-repl iframe') as HTMLIFrameElement;
   if (!iframe || !iframe.contentWindow) return;
 
-  // Cross-origin 접근 시도 시 에러 처리
+  // 프리뷰 에러 감지 시 iframe 리로드
+  if (e.data?.type === 'error' || (typeof e.data === 'string' && e.data.includes?.("Cannot read properties of undefined (reading 'default')"))) {
+    console.warn('[DevMonacoRepl] 프리뷰 에러 감지, iframe 리로드');
+    try { iframe.contentWindow.location.reload(); } catch {}
+    return;
+  }
+
   let internalStore;
   try {
     internalStore = (iframe.contentWindow as any).__INTERNAL_APP_STORE__;
@@ -426,6 +448,31 @@ onMounted(async () => {
 
   // 메시지 리스너 등록
   window.addEventListener('message', handleMessage);
+
+  // 프리뷰 iframe 에러 감지 → Agent에 전달
+  let reloadTimeout: ReturnType<typeof setTimeout> | null = null;
+  let lastErrorSent = '';
+  window.addEventListener('error', (evt) => {
+    const msg = evt.message || '';
+    // repl 내부 에러는 리로드
+    if (msg.includes("reading 'default'")) {
+      if (reloadTimeout) return;
+      reloadTimeout = setTimeout(() => {
+        const iframe = document.querySelector('.vue-repl iframe') as HTMLIFrameElement;
+        if (iframe?.contentWindow) {
+          try { iframe.contentWindow.location.reload(); } catch {}
+        }
+        reloadTimeout = null;
+      }, 500);
+      return;
+    }
+    // 그 외 런타임 에러 → Agent에 전달 (중복 방지)
+    if (msg && msg !== lastErrorSent) {
+      lastErrorSent = msg;
+      agentErrorContext.value = { message: msg, source: evt.filename, line: evt.lineno };
+      setTimeout(() => { lastErrorSent = ''; }, 3000);
+    }
+  }, true);
 
   // 모나코 에디터 선택 정보 가져오기
   const getMonacoSelectionInfo = () => {
