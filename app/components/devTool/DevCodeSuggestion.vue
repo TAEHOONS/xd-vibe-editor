@@ -43,15 +43,26 @@ function handleApply() {
 
     props.change.previousCode = file.code
 
-    const initRegex = /(function\s+initialize\s*\(\s*\)\s*\{)([\s\S]*?)(\})/
-    const match = file.code.match(initRegex)
-    if (match) {
-      const existing = match[2].trimEnd()
-      const indent = '  '
-      const indentedCode = props.change.code.split('\n').map(l => indent + l).join('\n')
-      file.code = file.code.replace(initRegex, `$1${existing}\n${indentedCode}\n$3`)
+    const trimmed = props.change.code.trim()
+    const isCompleteFunction = /^(function\s+\w+|const\s+\w+\s*=\s*(async\s*)?\(|async\s+function\s+\w+)/.test(trimmed)
+
+    const scriptClose = '</' + 'script>'
+    if (isCompleteFunction) {
+      if (file.code.includes(scriptClose)) {
+        file.code = file.code.replace(new RegExp('</' + 'script>'), '\n' + trimmed + '\n' + scriptClose)
+      } else {
+        file.code = file.code.trimEnd() + '\n\n' + trimmed + '\n'
+      }
     } else {
-      file.code = file.code.trimEnd() + '\n\n' + props.change.code + '\n'
+      const initRegex = /(function\s+initialize\s*\(\s*\)\s*\{)([\s\S]*?)(\})/
+      const match = file.code.match(initRegex)
+      if (match) {
+        const existing = match[2].trimEnd()
+        const indentedCode = trimmed.split('\n').map(l => '  ' + l).join('\n')
+        file.code = file.code.replace(initRegex, `$1${existing}\n${indentedCode}\n$3`)
+      } else {
+        file.code = file.code.trimEnd() + '\n\n' + trimmed + '\n'
+      }
     }
 
     props.change.status = 'applied'
