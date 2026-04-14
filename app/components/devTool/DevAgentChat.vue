@@ -64,7 +64,8 @@ const hasInput = computed(() =>
 const sendMessage = async () => {
   if (!hasInput.value || isLoading.value) return
 
-  // 세그먼트를 하나의 쿼리로 조합
+  const codeBlocks = segments.value.filter(s => s.type === 'code') as { type: 'code'; block: CodeBlock }[]
+
   const parts = segments.value.map(s => {
     if (s.type === 'code') {
       const b = s.block
@@ -75,7 +76,13 @@ const sendMessage = async () => {
 
   const fullQuery = parts.join('\n\n')
   segments.value = [{ type: 'text', value: '' }]
-  await send(fullQuery, getEditorContext())
+
+  // 선택 코드가 있으면 선택 코드만, 없으면 전체 코드 전송
+  const ctx = codeBlocks.length > 0
+    ? { code: codeBlocks.map(s => s.block.code).join('\n\n'), fileName: codeBlocks[0].block.fileName }
+    : getEditorContext()
+
+  await send(fullQuery, ctx)
   scrollToBottom()
 }
 
