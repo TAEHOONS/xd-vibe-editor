@@ -683,24 +683,8 @@ provide("isDarkTheme", isDarkTheme);
             </template>
           </v-tooltip>
 
-          <!-- Toggle Chat -->
-          <v-tooltip location="right" text="AI 어시스턴트">
-            <template v-slot:activator="{ props }">
-              <v-btn
-                icon
-                variant="plain"
-                :ripple="false"
-                v-bind="props"
-                class="tutorial-target-chat"
-                @click="isChatOpen = !isChatOpen"
-              >
-                <v-icon>mdi-robot-excited-outline</v-icon>
-              </v-btn>
-            </template>
-          </v-tooltip>
-
           <!-- Toggle Agent -->
-          <v-tooltip location="right" text="Agent">
+          <v-tooltip location="right" text="Vibe Agent">
             <template v-slot:activator="{ props }">
               <v-btn
                 icon
