@@ -23,7 +23,7 @@ export type AgentMessage = {
 
 export type AgentStep = 'analyzing' | 'searching' | 'generating' | 'validating' | null
 
-const AGENT_BASE_URL = 'http://localhost:8000'
+const AGENT_BASE_URL = ''
 
 function toChanges(suggestions: any[]): CodeChange[] {
   if (!Array.isArray(suggestions)) return []
@@ -60,19 +60,27 @@ export function useAgentChat() {
     currentStep.value = null
 
     // 스트리밍 메시지 placeholder
-    const streamingMsg: AgentMessage = {
+    messages.value.push({
       role: 'agent',
       text: '',
       timestamp: Date.now(),
       streaming: true
-    }
-    messages.value.push(streamingMsg)
+    })
+    const msgIndex = messages.value.length - 1
 
     try {
       const body: Record<string, any> = { question: query }
       if (context?.code) body.source_code = context.code
       if (context?.fileName) body.file_name = context.fileName
       if (context?.error) body.error_info = context.error
+
+      // 이전 대화 히스토리 전달 (현재 메시지 제외, 최근 10개)
+      const history = messages.value
+        .slice(0, -1) // 방금 추가한 user 메시지 제외
+        .filter(m => m.text)
+        .slice(-10)
+        .map(m => ({ role: m.role, content: m.text }))
+      if (history.length) body.history = history
 
       const res = await fetch(`${AGENT_BASE_URL}/api/v1/ask/stream`, {
         method: 'POST',
@@ -102,26 +110,24 @@ export function useAgentChat() {
 
           try {
             const event = JSON.parse(data)
-            console.log('[Agent Event]', event) // 디버깅
 
             if (event.type === 'step') {
               currentStep.value = event.step
               stepMessage.value = event.message || ''
-              console.log('→ Step:', event.step, event.message)
             } else if (event.type === 'token') {
-              streamingMsg.text += event.content
+              messages.value[msgIndex].text += event.content
             } else if (event.type === 'result') {
-              streamingMsg.text = event.answer
-              streamingMsg.streaming = false
+              messages.value[msgIndex].text = event.answer
+              messages.value[msgIndex].streaming = false
               if (event.code_suggestions) {
-                streamingMsg.changes = toChanges(event.code_suggestions)
+                messages.value[msgIndex].changes = toChanges(event.code_suggestions)
               }
             } else if (event.type === 'done') {
               currentStep.value = null
               stepMessage.value = ''
             } else if (event.type === 'error') {
-              streamingMsg.text = `오류: ${event.message}`
-              streamingMsg.streaming = false
+              messages.value[msgIndex].text = `오류: ${event.message}`
+              messages.value[msgIndex].streaming = false
             }
           } catch (e) {
             console.warn('이벤트 파싱 실패:', e)
@@ -129,8 +135,8 @@ export function useAgentChat() {
         }
       }
     } catch (e: any) {
-      streamingMsg.text = `연결 오류: ${e.message}`
-      streamingMsg.streaming = false
+      messages.value[msgIndex].text = `연결 오류: ${e.message}`
+      messages.value[msgIndex].streaming = false
     } finally {
       isLoading.value = false
       currentStep.value = null
