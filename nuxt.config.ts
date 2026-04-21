@@ -12,7 +12,14 @@ export default defineNuxtConfig({
     "@pinia/nuxt",
   ],
 
+  routeRules: {
+    '/api/**': { proxy: 'http://localhost:8000/api/**' },
+  },
+
   vite: {
+    server: {
+      allowedHosts: ['sliver-mongoose-issuing.ngrok-free.dev'],
+    },
     ssr: {
       noExternal: ["vuetify"],
     },

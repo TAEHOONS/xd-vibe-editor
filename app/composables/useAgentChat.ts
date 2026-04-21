@@ -26,7 +26,7 @@ export type AgentMessage = {
 
 export type AgentStep = 'analyzing' | 'searching' | 'generating' | 'validating' | null
 
-const AGENT_BASE_URL = 'http://localhost:8000'
+const AGENT_BASE_URL = ''
 
 function toChanges(suggestions: any[]): CodeChange[] {
   if (!Array.isArray(suggestions)) return []

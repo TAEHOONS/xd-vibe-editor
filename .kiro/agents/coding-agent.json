@@ -1,0 +1,6 @@
+{
+  "name": "coding-agent",
+  "description": "내 코딩 커스텀 에이전트",
+  "prompt": "당신은 전문 개발자입니다.",
+  "tools": ["fs_read", "fs_write", "execute_bash", "grep", "code", "glob"]
+}
