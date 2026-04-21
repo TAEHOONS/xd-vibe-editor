@@ -4,7 +4,7 @@ import { ref, nextTick, inject, computed, watch, type Ref } from 'vue'
 const isDarkTheme = inject('isDarkTheme', ref(true))
 const agentCodeContext = inject<Ref<any>>('agentCodeContext', ref(null))
 const agentErrorContext = inject<Ref<any>>('agentErrorContext', ref(null))
-const { messages, isLoading, currentStep, stepMessage, send, clear, changeSummary, allChanges } = useAgentChat()
+const { messages, isLoading, currentStep, stepMessage, conversationId, send, resume, clear, changeSummary, allChanges } = useAgentChat()
 
 const props = defineProps<{ isOpen: boolean }>()
 const emit = defineEmits<{ (e: 'close'): void }>()
@@ -83,6 +83,12 @@ const sendMessage = async () => {
     : getEditorContext()
 
   await send(fullQuery, ctx)
+  scrollToBottom()
+}
+
+const handleResume = async (threadId: string | undefined, approved: boolean) => {
+  if (!threadId) return
+  await resume(threadId, approved)
   scrollToBottom()
 }
 
@@ -272,8 +278,30 @@ function toggleCollapseAll() {
               <div class="flex-grow-1" style="min-width:0;">
                 <div v-if="msg.text" class="agent-bubble">
                   <span style="white-space: pre-wrap; font-size: 13px; line-height: 1.6;">{{ msg.text }}</span>
-                  <span v-if="msg.streaming" class="cursor-blink">▋</span>
                 </div>
+                
+                <!-- Human-in-the-Loop 중단 -->
+                <div v-if="msg.interrupted" class="mt-2 pa-3" style="background: #2d2d2d; border-radius: 8px; border: 1px solid #4a4a4a;">
+                  <div class="d-flex align-center gap-2 mb-2">
+                    <v-icon size="16" color="warning">mdi-pause-circle</v-icon>
+                    <span style="font-size: 13px; font-weight: 600; color: #ffc107;">코드 생성 전 확인 필요</span>
+                  </div>
+                  <details class="mb-2">
+                    <summary style="cursor: pointer; font-size: 12px; color: #aaa;">검색된 문서 보기</summary>
+                    <pre style="font-size: 11px; max-height: 200px; overflow-y: auto; background: #1e1e1e; color: #d4d4d4; padding: 8px; border-radius: 4px; margin-top: 8px; border: 1px solid #3a3a3a;">{{ msg.context }}</pre>
+                  </details>
+                  <div class="d-flex mt-3">
+                    <v-btn size="small" color="success" @click="handleResume(msg.threadId, true)" style="margin-right: 12px;">
+                      <v-icon size="14" class="mr-1">mdi-check</v-icon>
+                      승인 및 계속
+                    </v-btn>
+                    <v-btn size="small" color="error" variant="outlined" @click="handleResume(msg.threadId, false)">
+                      <v-icon size="14" class="mr-1">mdi-close</v-icon>
+                      취소
+                    </v-btn>
+                  </div>
+                </div>
+
                 <DevToolDevCodeSuggestion
                   v-for="(change, cIdx) in (msg.changes || [])"
                   :key="cIdx"
@@ -368,11 +396,11 @@ function toggleCollapseAll() {
             variant="plain"
             rows="1"
             auto-grow
-            max-rows="5"
             density="compact"
             hide-details
             :placeholder="sIdx === 0 && segments.length === 1 ? '메시지를 입력하세요...' : ''"
             class="seg-textarea px-3"
+            style="min-height: 40px;"
             @keydown="handleKeydown($event, sIdx)"
           />
         </template>
@@ -571,7 +599,18 @@ function toggleCollapseAll() {
   background: rgba(76, 175, 80, 0.06);
 }
 .seg-textarea { font-size: 13px; }
-.seg-textarea :deep(.v-field__input) { min-height: 28px !important; padding-top: 6px; padding-bottom: 4px; }
+.seg-textarea :deep(.v-field) {
+  min-height: auto !important;
+}
+.seg-textarea :deep(.v-field__input) { 
+  min-height: 28px !important; 
+  max-height: 400px !important;
+  padding-top: 6px; 
+  padding-bottom: 4px; 
+}
+.seg-textarea :deep(textarea) {
+  overflow-y: auto !important;
+}
 .send-btn { border-radius: 10px !important; width: 32px !important; height: 32px !important; }
 
 /* Fade */

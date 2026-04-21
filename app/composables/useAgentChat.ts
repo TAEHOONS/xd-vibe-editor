@@ -18,7 +18,10 @@ export type AgentMessage = {
   text: string
   timestamp: number
   changes?: CodeChange[]
-  streaming?: boolean
+  interrupted?: boolean
+  threadId?: string
+  context?: string
+  intent?: string
 }
 
 export type AgentStep = 'analyzing' | 'searching' | 'generating' | 'validating' | null
@@ -42,6 +45,13 @@ export function useAgentChat() {
   const isLoading = ref(false)
   const currentStep = ref<AgentStep>(null)
   const stepMessage = ref('')
+  const conversationId = ref<string | null>(null)
+
+  // localStorage에서 conversation_id 복원
+  if (typeof window !== 'undefined') {
+    const saved = localStorage.getItem('agent_conversation_id')
+    if (saved) conversationId.value = saved
+  }
 
   const changeSummary = computed(() => {
     const all = messages.value.flatMap(m => m.changes || [])
@@ -57,32 +67,23 @@ export function useAgentChat() {
   async function send(query: string, context?: { code?: string; fileName?: string; error?: string }) {
     messages.value.push({ role: 'user', text: query, timestamp: Date.now() })
     isLoading.value = true
-    currentStep.value = null
+    currentStep.value = 'analyzing'
 
-    // 스트리밍 메시지 placeholder
     messages.value.push({
       role: 'agent',
       text: '',
       timestamp: Date.now(),
-      streaming: true
     })
     const msgIndex = messages.value.length - 1
 
     try {
       const body: Record<string, any> = { question: query }
+      if (conversationId.value) body.conversation_id = conversationId.value
       if (context?.code) body.source_code = context.code
       if (context?.fileName) body.file_name = context.fileName
       if (context?.error) body.error_info = context.error
 
-      // 이전 대화 히스토리 전달 (현재 메시지 제외, 최근 10개)
-      const history = messages.value
-        .slice(0, -1) // 방금 추가한 user 메시지 제외
-        .filter(m => m.text)
-        .slice(-10)
-        .map(m => ({ role: m.role, content: m.text }))
-      if (history.length) body.history = history
-
-      const res = await fetch(`${AGENT_BASE_URL}/api/v1/ask/stream`, {
+      const res = await fetch(`${AGENT_BASE_URL}/api/v1/ask`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -90,57 +91,73 @@ export function useAgentChat() {
 
       if (!res.ok) throw new Error(`${res.status}`)
 
-      const reader = res.body?.getReader()
-      const decoder = new TextDecoder()
+      const result = await res.json()
 
-      if (!reader) throw new Error('No reader')
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-
-        const chunk = decoder.decode(value)
-        const lines = chunk.split('\n')
-
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue
-          
-          const data = line.slice(6)
-          if (!data.trim()) continue
-
-          try {
-            const event = JSON.parse(data)
-
-            if (event.type === 'step') {
-              currentStep.value = event.step
-              stepMessage.value = event.message || ''
-            } else if (event.type === 'token') {
-              messages.value[msgIndex].text += event.content
-            } else if (event.type === 'result') {
-              messages.value[msgIndex].text = event.answer
-              messages.value[msgIndex].streaming = false
-              if (event.code_suggestions) {
-                messages.value[msgIndex].changes = toChanges(event.code_suggestions)
-              }
-            } else if (event.type === 'done') {
-              currentStep.value = null
-              stepMessage.value = ''
-            } else if (event.type === 'error') {
-              messages.value[msgIndex].text = `오류: ${event.message}`
-              messages.value[msgIndex].streaming = false
-            }
-          } catch (e) {
-            console.warn('이벤트 파싱 실패:', e)
-          }
+      // Human-in-the-Loop 중단 처리
+      if (result.interrupted) {
+        conversationId.value = result.conversation_id
+        if (typeof window !== 'undefined') {
+          localStorage.setItem('agent_conversation_id', result.conversation_id)
         }
+        
+        messages.value[msgIndex].interrupted = true
+        messages.value[msgIndex].threadId = result.thread_id
+        messages.value[msgIndex].context = result.context
+        messages.value[msgIndex].intent = result.intent
+        messages.value[msgIndex].text = result.message || '코드 생성 전 검색된 문서를 확인하세요.'
+        return
+      }
+
+      // 정상 완료
+      conversationId.value = result.conversation_id
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('agent_conversation_id', result.conversation_id)
+      }
+
+      messages.value[msgIndex].text = result.answer
+      if (result.code_suggestions) {
+        messages.value[msgIndex].changes = toChanges(result.code_suggestions)
       }
     } catch (e: any) {
       messages.value[msgIndex].text = `연결 오류: ${e.message}`
-      messages.value[msgIndex].streaming = false
     } finally {
       isLoading.value = false
       currentStep.value = null
-      stepMessage.value = ''
+    }
+  }
+
+  async function resume(threadId: string, approved: boolean = true, additionalContext?: string) {
+    isLoading.value = true
+    currentStep.value = 'generating'
+
+    const msgIndex = messages.value.length
+    messages.value.push({
+      role: 'agent',
+      text: '',
+      timestamp: Date.now(),
+    })
+
+    try {
+      const params = new URLSearchParams({ thread_id: threadId, approved: String(approved) })
+      if (additionalContext) params.append('additional_context', additionalContext)
+
+      const res = await fetch(`${AGENT_BASE_URL}/api/v1/ask/resume?${params}`, {
+        method: 'POST',
+      })
+
+      if (!res.ok) throw new Error(`${res.status}`)
+
+      const result = await res.json()
+
+      messages.value[msgIndex].text = result.answer
+      if (result.code_suggestions) {
+        messages.value[msgIndex].changes = toChanges(result.code_suggestions)
+      }
+    } catch (e: any) {
+      messages.value[msgIndex].text = `재개 오류: ${e.message}`
+    } finally {
+      isLoading.value = false
+      currentStep.value = null
     }
   }
 
@@ -148,6 +165,10 @@ export function useAgentChat() {
     messages.value = []
     currentStep.value = null
     stepMessage.value = ''
+    conversationId.value = null
+    if (typeof window !== 'undefined') {
+      localStorage.removeItem('agent_conversation_id')
+    }
   }
 
   return { 
@@ -155,7 +176,9 @@ export function useAgentChat() {
     isLoading, 
     currentStep, 
     stepMessage, 
+    conversationId,
     send, 
+    resume,
     clear, 
     changeSummary, 
     allChanges 
