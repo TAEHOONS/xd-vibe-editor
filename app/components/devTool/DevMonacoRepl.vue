@@ -5,6 +5,10 @@ const notifyEditorEngineReady = inject<(() => void) | undefined>(
   "notifyEditorEngineReady",
   undefined,
 );
+
+const agentCodeContext = inject<Ref<any>>("agentCodeContext", ref(null));
+const agentErrorContext = inject<Ref<any>>("agentErrorContext", ref(null));
+const isAgentOpen = inject<Ref<boolean>>("isAgentOpen", ref(false));
 // import DevStatusBar from './DevStatusBar.vue';
 
 const { items, removeTitle, blobMap, registerBlobUrl,selectedAppData, selectedAppVrsnData } = useTreeStore();
@@ -97,7 +101,10 @@ const previewOptions = ref({
       import { inject, onMounted, defineProps } from 'vue'
       import { createPinia, setActivePinia } from 'pinia'
       import { useAppStore } from '~/stores/appStore'
-      import XDWorld from 'XDWorld'
+      if (window.__XDWORLD_INITIALIZED__) {
+        window.__XDWORLD_INITIALIZED__ = false;
+        window.location.reload();
+      }
     `,
     useCode: '', 
   },
@@ -228,7 +235,22 @@ function updateMockFetch() {
         }
       })
       app.use(vuetify)
-      app.use(XDWorld)
+
+      // XDWorld 엔진 직접 로드 (import 없이)
+      if (!window._XDWorldEM_loaded) {
+        if (!document.querySelector('script[src*="XDWorldEM.js"]')) {
+          const s = document.createElement('script');
+          s.src = 'https://cdn.xdworld.kr/latest/XDWorldEM.js';
+          s.onload = () => { window._XDWorldEM_loaded = true; };
+          document.head.appendChild(s);
+        } else {
+          window._XDWorldEM_loaded = true;
+        }
+      }
+      if (window.Module) {
+        app.provide('xdworld', window.Module);
+        app.config.globalProperties.$xdworld = window.Module;
+      }
 
       setTimeout(() => {
 
@@ -240,13 +262,7 @@ function updateMockFetch() {
         }
         // 엔진 초기화
         const initEngine = () => {
-            // [HMR 감지] 엔진 리로드로 상태 초기화
-            if (window.Module && window.__XDWORLD_INITIALIZED__) {
-                 window.location.reload();
-                 return;
-            }
-
-            if (window.Module) {
+            if (window.Module && typeof window.Module.initialize === 'function') {
                 app.config.globalProperties.$xdworld = window.Module;
 
                 window.Module.initialize({
@@ -303,6 +319,9 @@ function updateMockFetch() {
                 
                 createLayer();
                 window.useNuxtApp = () => ({ $xdworld: window.Module });
+            } else {
+                // Module 미로드 또는 initialize 미준비 — 재시도
+                setTimeout(initEngine, 500);
             }
         };
         initEngine();
@@ -390,10 +409,16 @@ const findNodeRecursive = (nodes: any[], predicate: string | ((node: any) => boo
 
 // Iframe 내부에서 보낸 메시지 수신 리스너
 const handleMessage = (e: MessageEvent) => {
-  const iframe = document.querySelector('iframe');
+  const iframe = document.querySelector('.vue-repl iframe') as HTMLIFrameElement;
   if (!iframe || !iframe.contentWindow) return;
 
-  // Cross-origin 접근 시도 시 에러 처리
+  // 프리뷰 에러 감지 시 iframe 리로드
+  if (e.data?.type === 'error' || (typeof e.data === 'string' && e.data.includes?.("Cannot read properties of undefined (reading 'default')"))) {
+    console.warn('[DevMonacoRepl] 프리뷰 에러 감지, iframe 리로드');
+    try { iframe.contentWindow.location.reload(); } catch {}
+    return;
+  }
+
   let internalStore;
   try {
     internalStore = (iframe.contentWindow as any).__INTERNAL_APP_STORE__;
@@ -423,6 +448,147 @@ onMounted(async () => {
 
   // 메시지 리스너 등록
   window.addEventListener('message', handleMessage);
+
+  // 프리뷰 iframe 에러 감지 → Agent에 전달
+  let reloadTimeout: ReturnType<typeof setTimeout> | null = null;
+  let lastErrorSent = '';
+  window.addEventListener('error', (evt) => {
+    const msg = evt.message || '';
+    // repl 내부 에러는 리로드
+    if (msg.includes("reading 'default'")) {
+      if (reloadTimeout) return;
+      reloadTimeout = setTimeout(() => {
+        const iframe = document.querySelector('.vue-repl iframe') as HTMLIFrameElement;
+        if (iframe?.contentWindow) {
+          try { iframe.contentWindow.location.reload(); } catch {}
+        }
+        reloadTimeout = null;
+      }, 500);
+      return;
+    }
+    // 그 외 런타임 에러 → Agent에 전달 (중복 방지)
+    if (msg && msg !== lastErrorSent) {
+      lastErrorSent = msg;
+      agentErrorContext.value = { message: msg, source: evt.filename, line: evt.lineno };
+      setTimeout(() => { lastErrorSent = ''; }, 3000);
+    }
+  }, true);
+
+  // 모나코 에디터 선택 정보 가져오기
+  const getMonacoSelectionInfo = () => {
+    try {
+      const editors = (window as any).monaco?.editor?.getEditors?.();
+      const editor = editors?.[0];
+      if (editor) {
+        const sel = editor.getSelection();
+        if (sel) {
+          const text = editor.getModel().getValueInRange(sel);
+          if (text?.trim()) {
+            const fileName = replStore.value?.activeFile?.filename || '선택된 코드';
+            return { code: text, fileName, startLine: sel.startLineNumber, endLine: sel.endLineNumber };
+          }
+        }
+      }
+    } catch {}
+
+    // fallback: window.getSelection
+    const fallbackText = window.getSelection()?.toString();
+    if (fallbackText?.trim()) {
+      const fileName = replStore.value?.activeFile?.filename || '선택된 코드';
+      return { code: fallbackText, fileName, startLine: 1, endLine: 1 };
+    }
+    return null;
+  };
+
+  // Ctrl+L: 선택한 코드를 Agent에 전달
+  const handleCtrlL = (e: KeyboardEvent) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'l') {
+      e.preventDefault();
+      const info = getMonacoSelectionInfo();
+      if (info) {
+        agentCodeContext.value = info;
+        isAgentOpen.value = true;
+      }
+    }
+  };
+  (window as any).__ctrlLHandler = handleCtrlL;
+  window.addEventListener('keydown', handleCtrlL, true);
+
+  // 코드 선택 시 "Agent에게 질문" 플로팅 버튼
+  let floatingBtn: HTMLElement | null = null;
+
+  const removeFloatingBtn = () => {
+    if (floatingBtn) {
+      floatingBtn.remove();
+      floatingBtn = null;
+    }
+  };
+
+  const handleMouseUp = (e: MouseEvent) => {
+    const target = e.target as HTMLElement;
+    if (!target.closest('.monaco-editor')) return;
+
+    removeFloatingBtn();
+
+    setTimeout(() => {
+      const info = getMonacoSelectionInfo();
+      if (!info) return;
+
+      floatingBtn = document.createElement('div');
+      floatingBtn.innerHTML = `
+        <span style="display:inline-flex;align-items:center;gap:4px;">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 0 1 7 7h1a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1h-1.07A7 7 0 0 1 14 23h-4a7 7 0 0 1-6.93-4H2a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h1a7 7 0 0 1 7-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 0 1 2-2m-4 14a2 2 0 1 0 0 4 2 2 0 0 0 0-4m8 0a2 2 0 1 0 0 4 2 2 0 0 0 0-4"/></svg>
+          Agent에게 질문
+        </span>`;
+      Object.assign(floatingBtn.style, {
+        position: 'fixed',
+        left: e.clientX + 'px',
+        top: (e.clientY - 36) + 'px',
+        zIndex: '9999',
+        background: '#4caf50',
+        color: '#fff',
+        padding: '4px 10px',
+        borderRadius: '6px',
+        fontSize: '12px',
+        fontWeight: '500',
+        cursor: 'pointer',
+        boxShadow: '0 2px 8px rgba(0,0,0,0.3)',
+        transition: 'opacity 0.15s, transform 0.15s',
+        opacity: '0',
+        transform: 'translateY(4px)',
+        userSelect: 'none',
+        whiteSpace: 'nowrap',
+      });
+      document.body.appendChild(floatingBtn);
+
+      requestAnimationFrame(() => {
+        if (floatingBtn) {
+          floatingBtn.style.opacity = '1';
+          floatingBtn.style.transform = 'translateY(0)';
+        }
+      });
+
+      floatingBtn.addEventListener('click', () => {
+        agentCodeContext.value = info;
+        isAgentOpen.value = true;
+        removeFloatingBtn();
+      });
+    }, 50);
+  };
+
+  const handleMouseDown = (e: MouseEvent) => {
+    if (floatingBtn && !floatingBtn.contains(e.target as Node)) {
+      removeFloatingBtn();
+    }
+  };
+
+  document.addEventListener('mouseup', handleMouseUp);
+  document.addEventListener('mousedown', handleMouseDown);
+  (window as any).__floatingBtnCleanup = () => {
+    document.removeEventListener('mouseup', handleMouseUp);
+    document.removeEventListener('mousedown', handleMouseDown);
+    removeFloatingBtn();
+  };
 
   let treeData = (selectedAppVrsnData as any).value?.pendingData;
 
@@ -586,8 +752,9 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
-  // 컴포넌트 언마운트 시 메시지 리스너 제거
   window.removeEventListener('message', handleMessage);
+  window.removeEventListener('keydown', (window as any).__ctrlLHandler, true);
+  (window as any).__floatingBtnCleanup?.();
 });
 
 const openNewWindow = () => {
